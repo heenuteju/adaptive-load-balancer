@@ -425,12 +425,7 @@ Update the server table in the controller and the host setup in `topology.py` so
 </details>
 
 ## Team
-Hiten T
 
-| Name | SRN | Contribution |
-|---|---|---|
-| [Member 1] | [SRN] | [e.g. server.py and client.py] |
-| [Member 2] | [SRN] | [e.g. topology.py] |
-| [Member 3] | [SRN] | [e.g. lb_controller.py] |
+Heena JK, Hiten T, Sidhartha Kedlaya
 
 <p align="center"><sub>Computer Networks (UE25CS243A) &middot; Jackfruit Mini Project &middot; SDN + Socket Programming</sub></p>
