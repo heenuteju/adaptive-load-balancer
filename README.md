@@ -131,6 +131,7 @@ Each mode was run on three loads. Requests per server are shown as h4 / h5 / h6.
 - If you change the number of servers, update the server table in the controller and the host setup in `topology.py`.
 
 ## Team
+Hiten T
 
 | Name | SRN | Part |
 |---|---|---|
