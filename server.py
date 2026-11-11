@@ -3,21 +3,37 @@
 Backend server. TCP on 5000, UDP on 5001, one thread per request.
 Every second it sends a UDP load report (active, avg_ms) to VIP:9999.
 Started automatically on h4/h5/h6 by topology.py.
+
+Overload test: send the process SIGUSR1 and it becomes DEGRADE_FACTOR times
+slower; send SIGUSR1 again and it goes back to normal. Example (in Mininet):
+    h5 pkill -USR1 -f "server.py --name h5"
 """
 import argparse
 import json
+import signal
 import socket
 import threading
 import time
 
 VIP = "10.0.0.100"
 REPORT_PORT = 9999
+DEGRADE_FACTOR = 10.0   # how much slower a degraded server is
 TCP_PORT = 5000
 UDP_PORT = 5001
 
 lock = threading.Lock()
 active = 0
 avg_ms = 0.0
+degraded = False
+server_name = "server"
+
+
+def toggle_degrade(signum, frame):
+    """SIGUSR1: switch between normal and degraded (overloaded) behaviour."""
+    global degraded
+    degraded = not degraded
+    print("server %s %s" % (server_name, "DEGRADED (x%d slower)" % DEGRADE_FACTOR
+                            if degraded else "back to normal"), flush=True)
 
 
 def do_work(delay):
@@ -26,7 +42,7 @@ def do_work(delay):
     with lock:
         active += 1
     start = time.time()
-    time.sleep(delay)
+    time.sleep(delay * (DEGRADE_FACTOR if degraded else 1.0))
     elapsed = (time.time() - start) * 1000.0
     with lock:
         active -= 1
@@ -87,12 +103,14 @@ def reporter(name):
 
 
 def main():
-    global avg_ms
+    global avg_ms, server_name
     p = argparse.ArgumentParser()
     p.add_argument("--name", required=True)
     p.add_argument("--delay", type=float, required=True)
     a = p.parse_args()
+    server_name = a.name
     avg_ms = a.delay * 1000.0      # starting estimate of processing time
+    signal.signal(signal.SIGUSR1, toggle_degrade)
 
     for fn, args in ((tcp_server, (a.name, a.delay)),
                      (udp_server, (a.name, a.delay)),

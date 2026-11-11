@@ -1,0 +1,40 @@
+scenario=overload controller=adaptive fault_at=8s fault_for=8s how=process proto=tcp
+
+
+=== TCP, 24 s, 10 workers ===
+  requests sent   : 3229
+  h4 answered 1904  (59.0%)
+  h5 answered 1223  (37.9%)
+  h6 answered  102  (3.2%)
+  Retries used   : 3
+Average latency : 74.4 ms
+Total time      : 24.26 s
+Throughput      : 133.1 req/s
+
+Timeline (requests answered in each second)
+  sec     h4    h5    h6  failed  avg ms
+    0     66    67     3       0     100
+    1     56    56     3       0      63
+    2     97    98     5       0      48
+    3     97    98     4       0      51
+    4     77    76     4       0      63
+    5     83    81     4       0      59
+    6     75    77     4       0      65
+    7     77    75     5       0      68
+    8     37    32     0       0     140
+    9    101     4     7       0      88
+   10    107    10     6       0      81
+   11     98     9     6       0      91
+   12     96    10     6       0      88
+   13     97     9     6       0      93
+   14     96    10     5       0      89
+   15     93     9     4       0      88
+   16     97    17     8       0      88
+   17     64    76     1       0      67
+   18     63    66     4       0      75
+   19     70    69     3       0      70
+   20     66    68     3       0      72
+   21     66    69     5       0      76
+   22     67    71     3       0      67
+   23     58    66     3       0      78
+

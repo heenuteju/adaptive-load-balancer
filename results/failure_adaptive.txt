@@ -1,0 +1,41 @@
+scenario=failure controller=adaptive fault_at=8s fault_for=8s how=process proto=tcp
+
+
+=== TCP, 24 s, 10 workers ===
+  requests sent   : 3292
+  h4 answered 1137  (34.6%)
+  h5 answered 2038  (62.0%)
+  h6 answered  112  (3.4%)
+  FAILED requests: 5
+  Retries used   : 65
+Average latency : 72.8 ms
+Total time      : 24.17 s
+Throughput      : 136.0 req/s
+
+Timeline (requests answered in each second)
+  sec     h4    h5    h6  failed  avg ms
+    0     97   100     5       0      57
+    1     94    95     4       0      46
+    2     85    82     5       0      57
+    3     85    84     4       0      58
+    4     82    83     5       0      59
+    5     71    81     4       0      66
+    6     64    66     2       0      73
+    7      4    93     6       3      98
+    8      0   101     7       2      90
+    9      0    96     7       0      93
+   10      0   106     6       0      87
+   11      0   117     6       0      80
+   12      0   113     6       0      85
+   13      0   122     7       0      80
+   14      0   110     7       0      84
+   15     48    50     2       0      99
+   16     70    59     3       0      72
+   17     64    62     4       0      79
+   18     64    63     4       0      78
+   19     72    73     4       0      65
+   20     64    75     4       0      69
+   21     54    70     4       0      79
+   22     55    66     3       0      81
+   23     64    71     3       0      72
+

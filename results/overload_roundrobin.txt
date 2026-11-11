@@ -1,0 +1,40 @@
+scenario=overload controller=roundrobin fault_at=8s fault_for=8s how=process proto=tcp
+
+
+=== TCP, 24 s, 10 workers ===
+  requests sent   : 1468
+  h4 answered  492  (33.5%)
+  h5 answered  487  (33.2%)
+  h6 answered  489  (33.3%)
+  Retries used   : 3
+Average latency : 164.4 ms
+Total time      : 24.34 s
+Throughput      : 60.3 req/s
+
+Timeline (requests answered in each second)
+  sec     h4    h5    h6  failed  avg ms
+    0     20    18    18       0     261
+    1     14    14    14       0     160
+    2     23    22    23       0     146
+    3     22    23    22       0     149
+    4     24    24    24       0     142
+    5     23    23    23       0     144
+    6     23    23    24       0     141
+    7     23    23    22       0     148
+    8     16    16    17       0     204
+    9     17    17    16       0     205
+   10     16    15    16       0     210
+   11     16    16    16       0     208
+   12     16    16    16       0     210
+   13     15    16    15       0     210
+   14     16    16    16       0     205
+   15     16    16    16       0     202
+   16     25    25    25       0     140
+   17     25    24    25       0     139
+   18     24    24    23       0     137
+   19     24    23    24       0     143
+   20     23    23    23       0     143
+   21     23    23    23       0     141
+   22     24    23    24       0     143
+   23     24    24    24       0     142
+

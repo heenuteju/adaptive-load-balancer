@@ -30,10 +30,14 @@
 - [Overview](#overview)
 - [Tools and technologies](#tools-and-technologies)
 - [How it works](#how-it-works)
+- [Failure handling and flow affinity](#failure-handling-and-flow-affinity)
+- [Network load and overload detection](#network-load-and-overload-detection)
+- [Project expectations checklist](#project-expectations-checklist)
 - [Project layout](#project-layout)
 - [Quick start](#quick-start)
 - [How we tested](#how-we-tested)
 - [Results](#results)
+- [Fault scenarios](#fault-scenarios)
 - [Screenshots](#screenshots)
 - [Analysis](#analysis)
 - [Troubleshooting](#troubleshooting)
@@ -92,6 +96,8 @@ h6 is deliberately slow (0.30 s of work per request against 0.02 s), so the adap
 | Application sockets | **Python 3 `socket` and `threading`** | Low-level TCP and UDP servers and clients, one thread per request |
 | Transport | **TCP and UDP** | TCP for reliable request and reply, UDP for low-latency requests and for the load reports |
 | Address resolution | **ARP** | The controller answers ARP for the VIP, because no real host owns it |
+| Traffic generator | **iperf** | Background UDP traffic that saturates one server's link in the congestion test |
+| Link limits | **Mininet `TCLink`** | Caps link bandwidth (`--bw`) so congestion is possible |
 | Environment | **Ubuntu on WSL2** | Where Mininet, OVS and POX were installed and tested |
 
 ## How it works
@@ -154,17 +160,101 @@ would have picked h6 because it has the fewest connections. Only the adaptive sc
 <summary><b>How to read a line of the controller log</b></summary>
 
 ```
-INFO:lb_controller:TCP 10.0.0.1:43268 -> h5 | active=0 pending=3 avg=20ms | totals h4=3 h5=3 h6=0
+INFO:lb_controller:TCP 10.0.0.1:43268 -> h5 | active=0 pending=3 avg=20ms net=0% | totals h4=3 h5=3 h6=0
 ```
 
 | Part | Meaning |
 |---|---|
 | `TCP 10.0.0.1:43268` | A new TCP flow from client h1, source port 43268 |
 | `-> h5` | The controller chose server h5 |
-| `active=0 pending=3 avg=20ms` | What the controller knew about h5 when it chose |
+| `active=0 pending=3 avg=20ms net=0%` | What the controller knew about h5 when it chose: requests in progress, flows assigned since its last report, average processing time, and how full its link is |
 | `totals h4=3 h5=3 h6=0` | How many flows each server has been given so far |
 
+The screenshots below were taken before network monitoring was added, so their log lines have no `net=` field.
+
 </details>
+
+## Failure handling and flow affinity
+
+> [!IMPORTANT]
+> These two questions decide how the balancer behaves when things go wrong: what happens when a server fails, and what happens to a flow that already has a server.
+
+### What happens when a server fails
+
+```mermaid
+flowchart TD
+  A["Server sends a load report every second"] --> B{"Report seen in the last 3 s?<br/>Switch port still up?"}
+  B -->|yes| C["UP: eligible for new flows"]
+  B -->|no| D["Mark the server DOWN and log it"]
+  D --> E["Delete the switch rules that point at it<br/>and forget its flows"]
+  E --> F["New flows go to the remaining servers"]
+  G["Its reports resume"] --> H["Mark RECOVERED: back in rotation"]
+```
+
+| Step | What the controller does |
+|---|---|
+| Detect | Two signals: the server's load reports stop for more than 3 s (a crashed process), or the switch reports its port went down (a cut link, detected immediately) |
+| React | Marks the server DOWN, deletes the forward and reverse rules that point at it, and removes its entries from the flow table |
+| Reroute | Every new flow is given to one of the servers that are still up, using the chosen algorithm. If no server is up, the flow is dropped and logged |
+| Recover | When the server's reports resume, it is marked RECOVERED and takes new flows again |
+
+**Connections that were open to the failed server are lost.** TCP state lives on the server, so the load balancer cannot move a live connection. The next packet of that flow is balanced to a live server, which has no such connection and resets it. `client.py --retries K` then retries on a new connection, which goes to a live server. UDP requests are independent, so they recover without any reset. The failure and the recovery are written to the controller log as `SERVER h4 DOWN` and `SERVER h4 RECOVERED`.
+
+**The static baseline does none of this.** Round robin (`--health=no`, the default for that mode) has no monitoring, so it keeps sending a third of the flows to a dead server. Running it with `--health=yes` shows round robin with failover for comparison.
+
+### What happens to a flow that is already allocated
+
+A flow is identified by client IP, client port and protocol. It is decided **once**, at its first packet.
+
+| Situation | What happens |
+|---|---|
+| Normal packets of the flow | Two rules in the switch carry them straight to the chosen server. The controller is not involved again |
+| The rules expire after 30 s idle | A later packet of the same flow is sent back to the same server, because the controller remembers the flow for 120 s (the sticky table) |
+| The server becomes busy or overloaded | The flow stays where it is. Only **new** flows avoid that server. Moving a TCP connection mid-stream would break it |
+| The server dies | The flow is forgotten and decided again, as described above |
+| Long idle flow (over 120 s) | Forgotten, and decided fresh if it ever resumes |
+
+## Network load and overload detection
+
+### Network load
+
+The controller asks the switch for its port counters once a second and turns the bytes that crossed each server's port into megabits per second and a utilisation figure (a fraction of the link capacity, set with `--link_mbps`, default 10). Every 5 s it logs a line like:
+
+```
+INFO:lb_controller:network load: h4=0.02Mb/s(0%)  h5=0.01Mb/s(0%)  h6=0.00Mb/s(0%)
+```
+
+Adaptive mode uses it in the server score:
+
+```
+score = (active + pending + 1) x avg_ms x (1 + 3 x link utilisation)
+```
+
+A server whose link is completely full looks four times busier, so new flows go elsewhere. Least conn and round robin ignore network load by design.
+
+### Overload detection
+
+| Rule | Value |
+|---|---|
+| A server is OVERLOADED when it reports this many active requests or more | 8 |
+| It stops being overloaded when it reports this many or fewer | 3 |
+| What the controller does | New flows avoid it while any other server is up. If every server is overloaded, the least bad one is used. Existing flows keep running |
+| Where it shows | `SERVER h5 OVERLOADED` and `SERVER h5 recovered from overload` in the controller log |
+
+All thresholds are constants at the top of `controller/lb_controller.py`.
+
+## Project expectations checklist
+
+| # | Expectation | How it is met | Where |
+|---|---|---|---|
+| 1 | Multiple TCP servers | h4, h5, h6 each serve TCP on port 5000 (and UDP on 5001) | `server.py` |
+| 2 | Concurrent client requests | Parallel workers (`-c`), fixed count (`-n`) or timed (`--duration`) | `client.py` |
+| 3 | Monitor server load | Servers send active requests and average time to the VIP by UDP every second | `server.py`, `lb_controller.py` |
+| 4 | Monitor network load | Switch port counters polled every second, shown as `net=` and in the score | `lb_controller.py` |
+| 5 | Distribute flows using SDN | Per-flow forward and reverse rewrite rules installed in the switch | `lb_controller.py` |
+| 6 | Detect overloaded servers | Reported load over a threshold marks the server OVERLOADED | `lb_controller.py` |
+| 7 | Detect server failures | Missing reports or a downed switch port mark the server DOWN, and its rules are removed | `lb_controller.py` |
+| 8 | Compare static and adaptive | Nine baseline runs plus three fault scenarios, each for round robin, least conn and adaptive | [Results](#results), [Fault scenarios](#fault-scenarios) |
 
 ## Project layout
 
@@ -173,8 +263,10 @@ INFO:lb_controller:TCP 10.0.0.1:43268 -> h5 | active=0 pending=3 avg=20ms | tota
 ├── server.py                 TCP and UDP backend, sends load reports (runs on h4, h5, h6)
 ├── client.py                 Load generator, prints per-server counts, latency, throughput
 ├── topology.py               Mininet topology: switch s1 and hosts h1 to h6, starts the servers
+├── scenarios.py              Automated failure, overload and congestion tests
 ├── controller/
 │   └── lb_controller.py      POX load balancer (copy into pox/ext/ to run)
+├── results/                  Output of scenarios.py (created when you run it)
 └── docs/
     ├── charts/               Charts built from the measured results
     └── screenshots/          Output screenshots for every mode and test case
@@ -185,10 +277,11 @@ INFO:lb_controller:TCP 10.0.0.1:43268 -> h5 | active=0 pending=3 avg=20ms | tota
 
 | File | What it does |
 |---|---|
-| `server.py` | Serves TCP on port 5000 and UDP on port 5001, one thread per request. Simulates work with a delay, tracks active requests and a moving-average processing time, and sends both to the VIP every second. Replies with its own name so the client can see who answered |
-| `client.py` | Sends many requests to the VIP over TCP or UDP with parallel workers. Options: `-n` total requests, `-c` workers, `--proto tcp` or `--proto udp`. Prints requests answered per server, failures, average latency, total time and throughput |
-| `topology.py` | Builds one switch and six hosts with fixed MAC addresses and static ARP entries, connects the switch to the POX controller, and starts the servers on h4, h5, h6 with delays of 0.02, 0.02 and 0.30 s |
-| `controller/lb_controller.py` | Answers ARP for the VIP, reads the servers' load reports, selects a server with the chosen algorithm, installs the forward and reverse rewrite rules, and logs every decision with running totals |
+| `server.py` | Serves TCP on port 5000 and UDP on port 5001, one thread per request. Simulates work with a delay, tracks active requests and a moving-average processing time, and sends both to the VIP every second. Replies with its own name so the client can see who answered. Sending the process `SIGUSR1` makes it 10x slower (a simulated overload), and again to undo it |
+| `client.py` | Sends many requests to the VIP over TCP or UDP with parallel workers. Options: `-n` total requests, `-c` workers, `--proto tcp` or `udp`, `--duration` to keep sending for N seconds with a per-second timeline, `--retries` and `--timeout` for failure tests. Prints requests answered per server, failures, average latency, total time and throughput |
+| `topology.py` | Builds one switch and six hosts with fixed MAC addresses and static ARP entries, connects the switch to the POX controller, and starts the servers on h4, h5, h6 with delays of 0.02, 0.02 and 0.30 s. `--bw N` limits every link to N Mbps |
+| `scenarios.py` | Builds the network, runs a timed client load, injects a fault (server crash, overload or link congestion) partway through, undoes it, and saves the client's timeline in `results/` |
+| `controller/lb_controller.py` | Answers ARP for the VIP, reads the servers' load reports and the switch port counters, detects failed and overloaded servers, selects a server with the chosen algorithm, installs and removes the rewrite rules, and logs every decision |
 
 </details>
 
@@ -215,9 +308,9 @@ cp controller/lb_controller.py ~/pox/ext/
 # 2. Make sure Open vSwitch is running
 sudo service openvswitch-switch start
 
-# 3. Terminal 1: start the controller (LB_MODE = roundrobin, leastconn or adaptive)
+# 3. Terminal 1: start the controller (--mode = roundrobin, leastconn or adaptive)
 cd ~/pox
-LB_MODE=adaptive python3 pox.py lb_controller
+python3 pox.py lb_controller --mode=adaptive
 
 # 4. Terminal 2: start the network, from this repository's folder
 sudo mn -c
@@ -232,7 +325,9 @@ h1 python3 client.py -n 300 -c 10
 h1 python3 client.py --proto udp -n 300 -c 10
 ```
 
-To test another mode: type `exit`, press Ctrl+C in Terminal 1, and repeat from step 3 with a different `LB_MODE`.
+To test another mode: type `exit`, press Ctrl+C in Terminal 1, and repeat from step 3 with a different `--mode`.
+
+Controller options: `--health=yes|no` turns failure and overload detection on or off (default: on, except for `roundrobin`, the static baseline), and `--link_mbps=10` sets the link capacity used for network load.
 To clean up: `exit`, then `sudo mn -c`.
 
 </details>
@@ -256,6 +351,9 @@ The same three test cases were run, one after another, for each of the three alg
 | Throughput | Answered requests divided by total time |
 
 ## Results
+
+> [!NOTE]
+> These nine runs were made with the first version of the controller, before failure, overload and network monitoring were added. Fault scenarios are in [the next section](#fault-scenarios).
 
 ### Scoreboard: average latency (lower is better)
 
@@ -291,6 +389,45 @@ Requests are shown as h4 / h5 / h6.
 \* The run included one failed request. Every such run shows a total time of about 10 s, which is consistent with the client waiting for a timeout, so the throughput of these runs is not comparable with the others.
 
 </details>
+
+## Fault scenarios
+
+Each scenario runs a timed client load (24 s, 10 workers, `--retries 2 --timeout 2`), injects a fault at 8 s, and undoes it at 16 s. Start the controller first in one terminal, then run the scenario in another. Repeat for each mode and compare.
+
+```bash
+# Terminal 1
+cd ~/pox
+python3 pox.py lb_controller --mode=adaptive          # then roundrobin, then leastconn
+
+# Terminal 2, from this repository's folder
+sudo mn -c
+sudo python3 scenarios.py failure    --label adaptive
+sudo python3 scenarios.py overload   --label adaptive
+sudo python3 scenarios.py congestion --label adaptive
+```
+
+Use `--label roundrobin` or `--label leastconn` to match the controller mode. The congestion scenario limits every link to 10 Mbps and runs iperf at 9 Mbps into h4. Add `--how link` to the failure scenario to cut h4's cable instead of killing its server.
+
+| Scenario | Fault at 8 s | What a good result looks like |
+|---|---|---|
+| Server failure | h4 crashes, returns at 16 s | Adaptive: failures only during the 3 s detection window, then all traffic on h5 and h6, and h4 takes traffic again after it returns. Round robin: keeps sending a third of the flows to h4, so failures continue until it returns |
+| Overload | h5 becomes 10x slower | Adaptive and least conn: new flows shift away from h5 and latency recovers. Round robin: latency stays high for the whole fault |
+| Congestion | 9 Mbps of background traffic fills h4's link | Adaptive: shifts new flows away from h4 using the network load figure. Round robin and least conn: keep using h4, so latency rises |
+
+The per-second timeline in each result file shows requests answered per server, failures and average latency, so the moment of the fault and the recovery are visible. You can also inject faults by hand in the Mininet CLI; the commands are printed when `topology.py` starts.
+
+### Measured results
+
+*Fill in after running the scenarios (take the numbers from the files in `results/`).*
+
+| Scenario | Mode | Failed requests | Avg latency | Time to recover |
+|---|---|---|---|---|
+| Server failure | Round robin | [ ] | [ ] | [ ] |
+| | Adaptive | [ ] | [ ] | [ ] |
+| Overload | Round robin | [ ] | [ ] | [ ] |
+| | Adaptive | [ ] | [ ] | [ ] |
+| Congestion | Round robin | [ ] | [ ] | [ ] |
+| | Adaptive | [ ] | [ ] | [ ] |
 
 ## Screenshots
 
@@ -364,7 +501,7 @@ Each screenshot shows the controller log (top terminal) and the client output (b
 <summary><b>The startup effect and the 10 s totals</b></summary>
 
 - **Startup.** Adaptive starts evenly until the first load reports arrive (about one second), so a few requests still reached h6 at the start of the 300-request runs.
-- **The 10 s totals.** The adaptive TCP 300 run, and the round robin and least conn 20-request runs, each had one failed request and a total time of about 10 s. These look like a client timeout rather than server capacity, so their throughput should not be compared.
+- **The 10 s totals.** The adaptive TCP 300 run, and the round robin and least conn 20-request runs, each had one failed request and a total time of about 10 s. The client's default timeout is 10 s (`--timeout`), so each of these runs waited for one request to time out. That is not server capacity, so their throughput should not be compared.
 - **Where the adaptive failure went.** The controller log counts 7 assignments to h6 against 6 answered requests, so the failed request was most likely sent to h6 during the startup window.
 
 </details>
@@ -414,6 +551,20 @@ Stale servers from an earlier run. Run `sudo mn -c` and `sudo pkill -f server.py
 <summary>The client prints FAILED requests right after start</summary>
 
 Wait two or three seconds after Mininet starts so the servers can begin reporting, then retry.
+
+</details>
+
+<details>
+<summary>Congestion scenario fails with a <code>tc</code> or <code>RTNETLINK</code> error</summary>
+
+Your kernel may not support bandwidth limits. Run `sudo python3 topology.py` without `--bw`, start iperf by hand in the CLI, and the network load figure will still be measured.
+
+</details>
+
+<details>
+<summary>The controller never prints <code>network load</code> lines</summary>
+
+The switch is not answering port statistics requests, or the controller started before the switch connected. Restart the controller, then run `topology.py`.
 
 </details>
 
